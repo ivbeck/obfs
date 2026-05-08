@@ -59,13 +59,13 @@ impl Frame {
         let prefix = obfs::generate_prefix(payload.len());
         let prefix_len = prefix.len() as u16;
 
-        let pad_len = obfs::padding_needed(2 + prefix.len() + 1 + 4 + payload.len() + 2);
+        let pre_pad_size = 2 + prefix.len() + 1 + 4 + payload.len() + 2;
+        let pad_len = obfs::padding_needed(pre_pad_size);
         let padding = obfs::random_padding(pad_len);
         let pad_len_u16 = pad_len.min(u16::MAX as usize) as u16;
+        let total_size = pre_pad_size + pad_len;
 
-        let total = 2 + prefix.len() + 1 + 4 + payload.len() + 2 + pad_len;
-        let mut buf = Vec::with_capacity(total);
-
+        let mut buf = Vec::with_capacity(total_size);
         buf.extend_from_slice(&prefix_len.to_le_bytes());
         buf.extend_from_slice(&prefix);
         buf.push(frame_type);
@@ -74,6 +74,7 @@ impl Frame {
         buf.extend_from_slice(&pad_len_u16.to_le_bytes());
         buf.extend_from_slice(&padding);
 
+        debug_assert_eq!(buf.len(), total_size);
         buf
     }
 

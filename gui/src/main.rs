@@ -65,8 +65,10 @@ impl App {
                 }
             };
 
+            let stats = vpn_obfs_common::observe::PumpStats::new();
+            let status = vpn_obfs_common::observe::ConnStatus::new();
             let result = rt.block_on(vpn_obfs_client::client::run(
-                server, psk, ip, gateway, sni, no_verify,
+                server, psk, ip, gateway, sni, no_verify, stats, status,
             ));
             let msg = match result {
                 Ok(()) => "Disconnected.".to_owned(),

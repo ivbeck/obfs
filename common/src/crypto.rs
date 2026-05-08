@@ -207,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn session_cipher_decrypt_exactly_12_bytes_passes_length_check() {
+        // Length check uses `<` not `<=`: 12 bytes is the minimum legal length,
+        // even though decryption itself fails at AEAD authentication.
+        let (init, _) = paired_ciphers(b"k");
+        let err = init.decrypt(&[0u8; 12]).unwrap_err().to_string();
+        assert!(
+            !err.contains("too short"),
+            "expected AEAD failure at exactly 12 bytes, got length error: {err}"
+        );
+    }
+
+    #[test]
     fn session_cipher_tamper_detected() {
         let (init, resp) = paired_ciphers(b"k");
         let mut ct = init.encrypt(b"trustme");

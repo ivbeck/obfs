@@ -20,10 +20,12 @@ use tokio_tungstenite::{
 };
 use tracing::{info, warn};
 use vpn_obfs_common::crypto::{derive_auth_token, psk_bytes, EphemeralKeypair, SessionCipher};
-use vpn_obfs_common::protocol::{pump_inbound, pump_outbound};
+use vpn_obfs_common::observe::{ConnState, ConnStatus, PumpStats};
+use vpn_obfs_common::protocol::{pump_inbound_stats, pump_outbound_stats};
 use vpn_obfs_common::tls_cfg::{client_config_no_verify, client_config_standard};
 use x25519_dalek::PublicKey;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     server: String,
     psk: String,
@@ -31,6 +33,8 @@ pub async fn run(
     gateway: String,
     sni: String,
     no_verify: bool,
+    stats: Arc<PumpStats>,
+    status: Arc<ConnStatus>,
 ) -> Result<()> {
     let tls_config = if no_verify {
         warn!("Certificate verification disabled - vulnerable to MITM");
@@ -59,6 +63,7 @@ pub async fn run(
     headers.insert("Cache-Control", "no-cache".parse()?);
 
     info!("Connecting to {server} (SNI: {sni})...");
+    status.set(ConnState::Connecting);
 
     let addr = tokio::net::lookup_host(&server)
         .await?
@@ -69,6 +74,7 @@ pub async fn run(
         .with_context(|| format!("TCP connect to {addr}"))?;
     tcp.set_nodelay(true)?;
 
+    status.set(ConnState::Handshaking);
     let (ws_stream, response) =
         connect_async_tls_with_config(request, None, false, Some(connector))
             .await
@@ -106,21 +112,26 @@ pub async fn run(
     let (ws_tx, ws_rx) = ws_stream.split();
     let (tun_w, tun_r) = tun_dev.split().context("split TUN device")?;
 
+    status.set(ConnState::Connected);
+
     let cipher_a = cipher.clone();
+    let stats_a = stats.clone();
     let a = tokio::spawn(async move {
-        if let Err(e) = pump_outbound(tun_r, ws_tx, cipher_a).await {
+        if let Err(e) = pump_outbound_stats(tun_r, ws_tx, cipher_a, stats_a).await {
             warn!("outbound pump ended: {e}");
         }
     });
 
     let cipher_b = cipher.clone();
+    let stats_b = stats.clone();
     let b = tokio::spawn(async move {
-        if let Err(e) = pump_inbound(ws_rx, tun_w, cipher_b).await {
+        if let Err(e) = pump_inbound_stats(ws_rx, tun_w, cipher_b, stats_b).await {
             warn!("inbound pump ended: {e}");
         }
     });
 
     tokio::select! { _ = a => {} _ = b => {} }
+    status.set(ConnState::Disconnected);
     info!("VPN session ended");
     Ok(())
 }
@@ -128,6 +139,9 @@ pub async fn run(
 fn setup_client_tun(ip: &str, gw: &str) -> Result<tun2::AsyncDevice> {
     let mut config = tun2::Configuration::default();
     config
+        // Use a dedicated interface name so we don't clash with the
+        // server-side TUN (which typically uses the default name).
+        .tun_name("obfs-client0")
         .address(ip)
         .destination(gw)
         .netmask("255.255.255.0")

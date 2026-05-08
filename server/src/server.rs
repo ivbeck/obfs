@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,9 +27,28 @@ use tracing::{info, warn};
 use tungstenite::handshake::server::{Request, Response};
 use vpn_obfs_common::crypto::{derive_auth_token, psk_bytes, EphemeralKeypair, SessionCipher};
 use vpn_obfs_common::frame::{Frame, TYPE_CLOSE, TYPE_DATA, TYPE_KEEPALIVE};
+use vpn_obfs_common::observe::PumpStats;
 use vpn_obfs_common::tls_cfg::{make_acceptor, server_config_from_pem, server_config_self_signed};
 use x25519_dalek::PublicKey;
 
+struct ConnGuard {
+    active: Arc<AtomicUsize>,
+}
+
+impl ConnGuard {
+    fn new(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self { active }
+    }
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     listen: String,
     psk: String,
@@ -36,6 +56,8 @@ pub async fn run(
     cert: Option<String>,
     key: Option<String>,
     domain: String,
+    stats: Arc<PumpStats>,
+    active: Arc<AtomicUsize>,
 ) -> Result<()> {
     let tls_config = match (cert, key) {
         (Some(c), Some(k)) => {
@@ -76,9 +98,14 @@ pub async fn run(
         let acceptor = acceptor.clone();
         let psk_key = psk_key.clone();
         let tun_dev = tun_dev.clone();
+        let stats = stats.clone();
+        let active = active.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(tcp_stream, peer, acceptor, psk_key, tun_dev).await {
+            let _guard = ConnGuard::new(active);
+            if let Err(e) =
+                handle_client(tcp_stream, peer, acceptor, psk_key, tun_dev, stats).await
+            {
                 warn!("Client {peer} disconnected: {e}");
             }
         });
@@ -92,6 +119,7 @@ async fn handle_client(
     acceptor: tokio_rustls::TlsAcceptor,
     psk_key: Arc<[u8; 32]>,
     tun_dev: Arc<tokio::sync::Mutex<tun2::AsyncDevice>>,
+    stats: Arc<PumpStats>,
 ) -> Result<()> {
     let tls_stream = acceptor.accept(tcp).await.context("TLS accept")?;
     info!("{peer}: TLS handshake OK");
@@ -168,6 +196,7 @@ async fn handle_client(
 
     let cipher_rx = cipher.clone();
     let tun_w = tun_dev.clone();
+    let stats_rx = stats.clone();
     let rx_task = tokio::spawn(async move {
         while let Some(msg) = ws_rx.next().await {
             let msg = match msg {
@@ -213,12 +242,15 @@ async fn handle_client(
             let mut dev = tun_w.lock().await;
             if let Err(e) = dev.write_all(&packet).await {
                 warn!("TUN write: {e}");
+                continue;
             }
+            stats_rx.record_rx(packet.len());
         }
     });
 
     let cipher_tx = cipher.clone();
     let tun_r = tun_dev.clone();
+    let stats_tx = stats.clone();
     let tx_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
@@ -241,6 +273,7 @@ async fn handle_client(
                 warn!("WS send: {e}");
                 break;
             }
+            stats_tx.record_tx(n);
         }
     });
 

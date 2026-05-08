@@ -15,13 +15,24 @@ use tracing::warn;
 
 use crate::crypto::SessionCipher;
 use crate::frame::{Frame, TYPE_CLOSE, TYPE_DATA, TYPE_KEEPALIVE};
+use crate::observe::PumpStats;
 
 pub const DEFAULT_READ_BUF: usize = 4096;
 
-pub async fn pump_outbound<R, S, E>(
+pub async fn pump_outbound<R, S, E>(reader: R, sink: S, cipher: Arc<SessionCipher>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display + Send + 'static,
+{
+    pump_outbound_stats(reader, sink, cipher, Arc::new(PumpStats::default())).await
+}
+
+pub async fn pump_outbound_stats<R, S, E>(
     mut reader: R,
     mut sink: S,
     cipher: Arc<SessionCipher>,
+    stats: Arc<PumpStats>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
@@ -44,15 +55,26 @@ where
             warn!("pump_outbound send: {e}");
             break;
         }
+        stats.record_tx(n);
     }
     let _ = sink.close().await;
     Ok(())
 }
 
-pub async fn pump_inbound<St, W, E>(
+pub async fn pump_inbound<St, W, E>(stream: St, writer: W, cipher: Arc<SessionCipher>) -> Result<()>
+where
+    St: Stream<Item = Result<Message, E>> + Unpin,
+    W: AsyncWrite + Unpin,
+    E: std::fmt::Display + Send + 'static,
+{
+    pump_inbound_stats(stream, writer, cipher, Arc::new(PumpStats::default())).await
+}
+
+pub async fn pump_inbound_stats<St, W, E>(
     mut stream: St,
     mut writer: W,
     cipher: Arc<SessionCipher>,
+    stats: Arc<PumpStats>,
 ) -> Result<()>
 where
     St: Stream<Item = Result<Message, E>> + Unpin,
@@ -98,6 +120,7 @@ where
             warn!("pump_inbound write: {e}");
             break;
         }
+        stats.record_rx(packet.len());
     }
     Ok(())
 }

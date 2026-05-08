@@ -19,6 +19,7 @@ tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
 tokio-rustls = "0.25"
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

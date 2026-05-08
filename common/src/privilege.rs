@@ -37,6 +37,13 @@ pub(crate) fn shell_quote(s: &str) -> String {
 }
 
 pub fn ensure_elevated(binary_name: &str) -> Result<ElevationOutcome> {
+    ensure_elevated_with_relaunch(binary_name, true)
+}
+
+pub fn ensure_elevated_with_relaunch(
+    binary_name: &str,
+    allow_relaunch: bool,
+) -> Result<ElevationOutcome> {
     if is_elevated() {
         return Ok(ElevationOutcome::Continue);
     }
@@ -44,15 +51,22 @@ pub fn ensure_elevated(binary_name: &str) -> Result<ElevationOutcome> {
     let exe = std::env::current_exe().context("resolve current executable path")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if try_relaunch_elevated(&exe, &args) {
+    if allow_relaunch && try_relaunch_elevated(&exe, &args) {
         eprintln!("{binary_name}: requesting elevated privileges...");
         return Ok(ElevationOutcome::Relaunched);
     }
 
+    let launch_hint = if allow_relaunch {
+        "Run as root/admin (sudo on Linux/macOS, Administrator on Windows)."
+    } else {
+        "Run this command from an already elevated terminal \
+        (for example: sudo -E <command>) so interactive TUI IO stays attached."
+    };
+
     bail!(
         "{binary_name} requires administrator/root privileges.\n\
         Why: it must create a TUN network interface and modify system routing/NAT.\n\
-        Run as root/admin (sudo on Linux/macOS, Administrator on Windows).\n\
+        {launch_hint}\n\
         Source code: {}",
         source_url()
     );
