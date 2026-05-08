@@ -10,6 +10,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 sha2 = "0.10"
+subtle = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.25"
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
@@ -19,3 +20,8 @@ tun2 = { version = "2", features = ["async"] }
 tungstenite = "0.21"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 vpn-obfs-common = { path = "../common" }
+
+[dev-dependencies]
+http = "1"
+rustls = { version = "0.22", default-features = false, features = ["tls12"] }
+tokio = { version = "1", features = ["full", "test-util", "macros"] }

@@ -18,12 +18,13 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 use tracing::{info, warn};
 use tungstenite::handshake::server::{Request, Response};
-use vpn_obfs_common::crypto::{psk_bytes, EphemeralKeypair, SessionCipher};
+use vpn_obfs_common::crypto::{derive_auth_token, psk_bytes, EphemeralKeypair, SessionCipher};
 use vpn_obfs_common::frame::{Frame, TYPE_CLOSE, TYPE_DATA, TYPE_KEEPALIVE};
 use vpn_obfs_common::tls_cfg::{make_acceptor, server_config_from_pem, server_config_self_signed};
 use x25519_dalek::PublicKey;
@@ -98,29 +99,25 @@ async fn handle_client(
     let server_kp = EphemeralKeypair::generate();
     let server_pub_b64 = STANDARD.encode(server_kp.public.as_bytes());
 
-    // Shared state populated by the WS handshake callback
     let client_pub_bytes: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
         Arc::new(std::sync::Mutex::new(None));
-    let auth_ok: Arc<std::sync::Mutex<bool>> = Arc::new(std::sync::Mutex::new(false));
+    let auth_token: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
 
     let cpb_clone = client_pub_bytes.clone();
-    let aok_clone = auth_ok.clone();
+    let auth_clone = auth_token.clone();
     let spub_clone = server_pub_b64.clone();
 
     let ws_stream = accept_hdr_async(tls_stream, move |req: &Request, mut res: Response| {
-        // Grab X-VPN-Key (client's public key)
         if let Some(k) = req.headers().get("X-VPN-Key") {
             *cpb_clone.lock().unwrap() = Some(k.as_bytes().to_vec());
         }
 
-        // Validate X-VPN-Auth = HMAC-SHA256(PSK, client_pubkey)
         if let Some(auth) = req.headers().get("X-VPN-Auth") {
-            if auth.len() == 64 {
-                *aok_clone.lock().unwrap() = true;
+            if let Ok(s) = auth.to_str() {
+                *auth_clone.lock().unwrap() = Some(s.to_owned());
             }
         }
 
-        // Return our public key in the 101 response
         res.headers_mut()
             .insert("X-VPN-Key", spub_clone.parse().expect("header value"));
         res.headers_mut()
@@ -132,9 +129,11 @@ async fn handle_client(
 
     info!("{peer}: WebSocket handshake OK");
 
-    if !*auth_ok.lock().unwrap() {
-        bail!("missing/invalid X-VPN-Auth");
-    }
+    let provided_token = auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .context("missing X-VPN-Auth")?;
 
     let client_pub_raw = client_pub_bytes
         .lock()
@@ -148,6 +147,16 @@ async fn handle_client(
     }
     let client_pub_arr: [u8; 32] = client_pub_raw.try_into().unwrap();
     let client_pub = PublicKey::from(client_pub_arr);
+
+    let expected_token = derive_auth_token(psk_key.as_ref(), &client_pub_arr);
+    if expected_token
+        .as_bytes()
+        .ct_eq(provided_token.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
+        bail!("invalid X-VPN-Auth");
+    }
 
     let shared = server_kp.diffie_hellman(&client_pub);
     let cipher = SessionCipher::new(&shared, psk_key.as_ref(), false);
@@ -369,4 +378,63 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hex_known_vector() {
+        // RFC 6234 / FIPS 180-4 — "abc" hashes to a fixed value.
+        let got = sha256_hex(b"abc");
+        assert_eq!(
+            got,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_empty_input() {
+        let got = sha256_hex(b"");
+        assert_eq!(
+            got,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hex_encode_known_vector() {
+        assert_eq!(hex_encode(&[0xDE, 0xAD, 0xBE, 0xEF]), "deadbeef");
+    }
+
+    #[test]
+    fn hex_encode_empty() {
+        assert_eq!(hex_encode(&[]), "");
+    }
+
+    #[test]
+    fn auth_validation_uses_derive_auth_token() {
+        // Server's expected token must equal client's derive_auth_token output.
+        let psk = psk_bytes("secret");
+        let pubkey = [42u8; 32];
+        let expected = derive_auth_token(&psk, &pubkey);
+        assert_eq!(expected.len(), 64);
+        // Wrong-length token loses the constant-time compare.
+        let provided = "deadbeef";
+        assert_ne!(expected, provided);
+        assert!(expected.as_bytes().ct_eq(provided.as_bytes()).unwrap_u8() != 1);
+        // Same length, different content — must still reject.
+        let same_length: String = "00".repeat(32);
+        assert_ne!(expected, same_length);
+        assert!(
+            expected
+                .as_bytes()
+                .ct_eq(same_length.as_bytes())
+                .unwrap_u8()
+                != 1
+        );
+        // Real expected matches.
+        assert!(expected.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1);
+    }
 }

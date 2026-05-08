@@ -1,0 +1,38 @@
+[package]
+name = "vpn-obfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vpn-obfs-common = { path = "../common" }
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "strip_prefix"
+path = "fuzz_targets/strip_prefix.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cipher_decrypt"
+path = "fuzz_targets/cipher_decrypt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_decode_loop"
+path = "fuzz_targets/encode_decode_loop.rs"
+test = false
+doc = false
+
+[workspace]

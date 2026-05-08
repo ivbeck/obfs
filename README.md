@@ -152,6 +152,10 @@ sudo vpn-obfs-server --listen 0.0.0.0:443
   framing + obfs prefix) means effective payload MTU is ~1300 bytes.
   PMTUD will handle this automatically for TCP. For UDP-heavy workloads
   you may want to lower the client-side TUN MTU to 1280.
+- **Privilege handling**: `vpn-obfs-client`, `vpn-obfs-server`, and
+  `vpn-obfs-gui` try to auto-elevate privileges at startup. If elevation
+  is denied/unavailable, they terminate with a clear message explaining
+  that TUN creation and route/NAT changes require root/admin rights.
 
 ---
 
@@ -188,3 +192,7 @@ client/src/
 gui/src/
 └── main.rs      desktop GUI for the client
 ```
+
+## Source code
+
+- GitHub: [ivbeck/obfs](https://github.com/ivbeck/obfs)

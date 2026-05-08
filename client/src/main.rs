@@ -1,5 +1,6 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use vpn_obfs_common::privilege::{ensure_elevated, ElevationOutcome};
 
 #[derive(Parser)]
 #[command(name = "vpn-obfs-client", version, about)]
@@ -32,6 +33,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match ensure_elevated("vpn-obfs-client")? {
+        ElevationOutcome::Continue => {}
+        ElevationOutcome::Relaunched => return Ok(()),
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()

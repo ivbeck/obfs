@@ -12,18 +12,15 @@
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async_tls_with_config,
-    tungstenite::{client::IntoClientRequest, Message},
-    Connector,
+    connect_async_tls_with_config, tungstenite::client::IntoClientRequest, Connector,
 };
 use tracing::{info, warn};
-use vpn_obfs_common::crypto::{psk_bytes, EphemeralKeypair, SessionCipher};
-use vpn_obfs_common::frame::{Frame, TYPE_CLOSE, TYPE_DATA, TYPE_KEEPALIVE};
+use vpn_obfs_common::crypto::{derive_auth_token, psk_bytes, EphemeralKeypair, SessionCipher};
+use vpn_obfs_common::protocol::{pump_inbound, pump_outbound};
 use vpn_obfs_common::tls_cfg::{client_config_no_verify, client_config_standard};
 use x25519_dalek::PublicKey;
 
@@ -72,9 +69,10 @@ pub async fn run(
         .with_context(|| format!("TCP connect to {addr}"))?;
     tcp.set_nodelay(true)?;
 
-    let (ws_stream, response) = connect_async_tls_with_config(request, None, false, Some(connector))
-        .await
-        .context("WebSocket connect")?;
+    let (ws_stream, response) =
+        connect_async_tls_with_config(request, None, false, Some(connector))
+            .await
+            .context("WebSocket connect")?;
 
     info!("WebSocket connected - HTTP {}", response.status());
 
@@ -105,92 +103,24 @@ pub async fn run(
 
     info!("TUN interface up: {client_ip}/24 -> {gateway}");
 
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
-    let tun_dev = Arc::new(tokio::sync::Mutex::new(tun_dev));
+    let (ws_tx, ws_rx) = ws_stream.split();
+    let (tun_w, tun_r) = tun_dev.split().context("split TUN device")?;
 
     let cipher_a = cipher.clone();
-    let tun_a = tun_dev.clone();
     let a = tokio::spawn(async move {
-        let mut buf = vec![0u8; 4096];
-        loop {
-            let n = {
-                let mut dev = tun_a.lock().await;
-                match dev.read(&mut buf).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        warn!("TUN read: {e}");
-                        break;
-                    }
-                }
-            };
-            if n == 0 {
-                continue;
-            }
-
-            let ct = cipher_a.encrypt(&buf[..n]);
-            let wire = Frame::encode(TYPE_DATA, &ct);
-            if let Err(e) = ws_tx.send(Message::Binary(wire)).await {
-                warn!("WS send: {e}");
-                break;
-            }
+        if let Err(e) = pump_outbound(tun_r, ws_tx, cipher_a).await {
+            warn!("outbound pump ended: {e}");
         }
     });
 
     let cipher_b = cipher.clone();
-    let tun_b = tun_dev.clone();
     let b = tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
-            let data = match msg {
-                Ok(Message::Binary(b)) => b,
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
-                Ok(Message::Close(_)) => {
-                    info!("Server closed connection");
-                    break;
-                }
-                Ok(_) => continue,
-                Err(e) => {
-                    warn!("WS recv: {e}");
-                    break;
-                }
-            };
-
-            let (ftype, ct) = match Frame::decode(&data) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("frame decode: {e}");
-                    continue;
-                }
-            };
-
-            match ftype {
-                TYPE_KEEPALIVE => continue,
-                TYPE_CLOSE => break,
-                TYPE_DATA => {}
-                _ => continue,
-            }
-
-            let packet = match cipher_b.decrypt(&ct) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("decrypt: {e}");
-                    continue;
-                }
-            };
-
-            let mut dev = tun_b.lock().await;
-            if let Err(e) = dev.write_all(&packet).await {
-                warn!("TUN write: {e}");
-            }
+        if let Err(e) = pump_inbound(ws_rx, tun_w, cipher_b).await {
+            warn!("inbound pump ended: {e}");
         }
     });
 
-    let ka = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-        }
-    });
-
-    tokio::select! { _ = a => {} _ = b => {} _ = ka => {} }
+    tokio::select! { _ = a => {} _ = b => {} }
     info!("VPN session ended");
     Ok(())
 }
@@ -228,8 +158,7 @@ fn setup_routing(server_host: &str, _client_ip: &str, gateway: &str) -> Result<(
             );
             #[cfg(target_os = "windows")]
             run_best_effort(
-                Command::new("route")
-                    .args(["ADD", &server_ip, "MASK", "255.255.255.255", gw]),
+                Command::new("route").args(["ADD", &server_ip, "MASK", "255.255.255.255", gw]),
                 "preserve direct route to VPN server",
             );
         } else {
@@ -262,13 +191,11 @@ fn setup_routing(server_host: &str, _client_ip: &str, gateway: &str) -> Result<(
     #[cfg(target_os = "windows")]
     {
         run_best_effort(
-            Command::new("route")
-                .args(["ADD", "0.0.0.0", "MASK", "128.0.0.0", gateway]),
+            Command::new("route").args(["ADD", "0.0.0.0", "MASK", "128.0.0.0", gateway]),
             "install VPN split route 0.0.0.0/1",
         );
         run_best_effort(
-            Command::new("route")
-                .args(["ADD", "128.0.0.0", "MASK", "128.0.0.0", gateway]),
+            Command::new("route").args(["ADD", "128.0.0.0", "MASK", "128.0.0.0", gateway]),
             "install VPN split route 128.0.0.0/1",
         );
     }
@@ -283,7 +210,11 @@ fn setup_routing(server_host: &str, _client_ip: &str, gateway: &str) -> Result<(
 fn resolve_first(host: &str) -> Option<String> {
     let h = host.split(':').next()?;
     use std::net::ToSocketAddrs;
-    (h, 443u16).to_socket_addrs().ok()?.next().map(|a| a.ip().to_string())
+    (h, 443u16)
+        .to_socket_addrs()
+        .ok()?
+        .next()
+        .map(|a| a.ip().to_string())
 }
 
 fn real_gateway() -> Option<String> {
@@ -308,13 +239,11 @@ fn real_gateway() -> Option<String> {
             .output()
             .ok()?;
         let s = String::from_utf8_lossy(&out.stdout);
-        return s
-            .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix("gateway:")
-                    .map(|gw| gw.trim().to_owned())
-            });
+        return s.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("gateway:")
+                .map(|gw| gw.trim().to_owned())
+        });
     }
 
     #[cfg(target_os = "windows")]
@@ -345,15 +274,4 @@ fn run_best_effort(cmd: &mut std::process::Command, action: &str) {
         Ok(status) => warn!("{action} failed with exit status {status}"),
         Err(e) => warn!("{action} failed: {e}"),
     }
-}
-
-/// Derive a hex HMAC-SHA256(psk, pubkey) for the X-VPN-Auth header.
-/// Prevents unauthenticated parties from completing the handshake.
-fn derive_auth_token(psk: &[u8; 32], pubkey: &[u8]) -> String {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(Some(psk), pubkey);
-    let mut tag = [0u8; 32];
-    hk.expand(b"vpn-obfs/auth-token", &mut tag).expect("HKDF");
-    tag.iter().map(|b| format!("{b:02x}")).collect()
 }

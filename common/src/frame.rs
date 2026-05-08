@@ -22,7 +22,7 @@ use anyhow::{bail, Result};
 pub const TYPE_DATA: u8 = 0x01; // tunnelled IP packet
 pub const TYPE_KEEPALIVE: u8 = 0x02; // heartbeat (no payload)
 pub const TYPE_CLOSE: u8 = 0x03; // graceful close
-// 0x04-0xFF reserved for future use
+                                 // 0x04-0xFF reserved for future use
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -115,5 +115,159 @@ impl Frame {
         let payload = data[pos..pos + payload_len].to_vec();
 
         Ok((frame_type, payload))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn rt(ftype: u8, payload: &[u8]) -> (u8, Vec<u8>) {
+        let wire = Frame::encode(ftype, payload);
+        Frame::decode(&wire).unwrap()
+    }
+
+    #[test]
+    fn roundtrip_data_zero_payload() {
+        let (t, p) = rt(TYPE_DATA, &[]);
+        assert_eq!(t, TYPE_DATA);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_data_small() {
+        let pt = b"\x01\x02\x03\x04\x05";
+        let (t, p) = rt(TYPE_DATA, pt);
+        assert_eq!(t, TYPE_DATA);
+        assert_eq!(p, pt);
+    }
+
+    #[test]
+    fn roundtrip_data_large_64k() {
+        // 65535 because u16; 64k feels like the limit you'd actually hit.
+        let pt = vec![0xABu8; 65_535];
+        let (t, p) = rt(TYPE_DATA, &pt);
+        assert_eq!(t, TYPE_DATA);
+        assert_eq!(p, pt);
+    }
+
+    #[test]
+    fn roundtrip_keepalive() {
+        let (t, p) = rt(TYPE_KEEPALIVE, &[]);
+        assert_eq!(t, TYPE_KEEPALIVE);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_close() {
+        let (t, p) = rt(TYPE_CLOSE, &[]);
+        assert_eq!(t, TYPE_CLOSE);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn decode_truncated_at_prefix_len_offset_0() {
+        assert!(Frame::decode(&[]).is_err());
+        assert!(Frame::decode(&[0x00]).is_err());
+    }
+
+    #[test]
+    fn decode_truncated_at_prefix_offset_2() {
+        // prefix_len = 10 but no prefix bytes follow.
+        let buf = [10u8, 0u8];
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_truncated_at_type_byte() {
+        // prefix_len = 0, then nothing — type byte missing.
+        let buf = [0u8, 0u8];
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_truncated_at_payload_len() {
+        // prefix=0, type=DATA, missing payload_len.
+        let buf = [0u8, 0u8, TYPE_DATA];
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_truncated_payload_short() {
+        // prefix=0, type=DATA, payload_len=10, no payload.
+        let mut buf = vec![0u8, 0u8, TYPE_DATA];
+        buf.extend_from_slice(&10u32.to_le_bytes());
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_oversized_payload_len_rejected() {
+        // payload_len = u32::MAX must not panic, must fail cleanly.
+        let mut buf = vec![0u8, 0u8, TYPE_DATA];
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_zero_prefix_len_ok() {
+        let mut buf = vec![0u8, 0u8, TYPE_DATA];
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(b"abc");
+        let (t, p) = Frame::decode(&buf).unwrap();
+        assert_eq!(t, TYPE_DATA);
+        assert_eq!(p, b"abc");
+    }
+
+    #[test]
+    fn decode_max_prefix_len_truncates_cleanly() {
+        // prefix_len = u16::MAX, but actual data falls short — should error not panic.
+        let buf = [0xFFu8, 0xFFu8, 0u8];
+        assert!(Frame::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn encode_total_size_lands_in_bucket_or_tail() {
+        let payload = vec![0u8; 100];
+        let wire = Frame::encode(TYPE_DATA, &payload);
+        // padding + headers should push us into a normal MTU bucket.
+        assert!(
+            wire.len() >= 512,
+            "wire too short: {} (no padding applied?)",
+            wire.len()
+        );
+    }
+
+    #[test]
+    fn encode_keepalive_no_payload_still_padded() {
+        let wire = Frame::encode(TYPE_KEEPALIVE, &[]);
+        assert!(wire.len() >= 512);
+    }
+
+    #[test]
+    fn encode_random_payloads_decode_back() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for _ in 0..100 {
+            let len: usize = rng.gen_range(0..2048);
+            let pt: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+            let wire = Frame::encode(TYPE_DATA, &pt);
+            let (t, p) = Frame::decode(&wire).unwrap();
+            assert_eq!(t, TYPE_DATA);
+            assert_eq!(p, pt);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_encode_decode_roundtrip(
+            ftype in prop_oneof![Just(TYPE_DATA), Just(TYPE_KEEPALIVE), Just(TYPE_CLOSE)],
+            payload in prop::collection::vec(any::<u8>(), 0..8192),
+        ) {
+            let wire = Frame::encode(ftype, &payload);
+            let (t, p) = Frame::decode(&wire).unwrap();
+            prop_assert_eq!(t, ftype);
+            prop_assert_eq!(p, payload);
+        }
     }
 }

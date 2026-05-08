@@ -142,3 +142,113 @@ fn unix_ts_jittered() -> u64 {
     let delta: i64 = rng.gen_range(-2..=2);
     (base as i64 + delta).max(0) as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn generate_prefix_ends_with_double_crlf() {
+        let p = generate_prefix(42);
+        assert!(p.ends_with(b"\r\n\r\n"));
+    }
+
+    #[test]
+    fn generate_prefix_starts_with_post() {
+        let p = generate_prefix(0);
+        assert!(p.starts_with(b"POST "));
+    }
+
+    #[test]
+    fn generate_prefix_contains_known_host() {
+        let p = generate_prefix(0);
+        let s = std::str::from_utf8(&p).unwrap();
+        assert!(
+            CDN_HOSTS.iter().any(|h| s.contains(h)),
+            "no known CDN host in prefix: {s}"
+        );
+    }
+
+    #[test]
+    fn generate_prefix_length_in_range() {
+        // Has to be big enough to contain a full HTTP block, small enough not to dwarf the payload.
+        for _ in 0..32 {
+            let p = generate_prefix(1500);
+            assert!(p.len() >= 200 && p.len() <= 2048, "len={}", p.len());
+        }
+    }
+
+    #[test]
+    fn strip_prefix_with_marker_returns_tail() {
+        let data = b"GET / HTTP/1.1\r\n\r\nPAYLOAD";
+        assert_eq!(strip_prefix(data), b"PAYLOAD");
+    }
+
+    #[test]
+    fn strip_prefix_no_marker_returns_input() {
+        // Caller will fail-open at decrypt time — by design.
+        let data = b"no markers here";
+        assert_eq!(strip_prefix(data), data);
+    }
+
+    #[test]
+    fn strip_prefix_marker_at_zero() {
+        let data = b"\r\n\r\nABC";
+        assert_eq!(strip_prefix(data), b"ABC");
+    }
+
+    #[test]
+    fn strip_prefix_empty_input() {
+        let empty: &[u8] = &[];
+        assert_eq!(strip_prefix(empty), empty);
+    }
+
+    #[test]
+    fn padding_needed_under_512_lands_in_512_bucket_with_jitter() {
+        for _ in 0..32 {
+            let pad = padding_needed(100);
+            // base = 412, plus 0..32 jitter.
+            assert!((412..412 + 32).contains(&pad), "pad={pad}");
+        }
+    }
+
+    #[test]
+    fn padding_needed_at_each_bucket_boundary() {
+        for &len in &[
+            511usize, 512, 1023, 1024, 1279, 1280, 1499, 1500, 2047, 2048, 4095,
+        ] {
+            let pad = padding_needed(len);
+            // Just check we got a value back without panicking; bucketing is property-tested.
+            assert!(pad < 5000, "wild pad {pad} for len {len}");
+        }
+    }
+
+    #[test]
+    fn padding_needed_above_4096_returns_tail_16_to_64() {
+        for _ in 0..32 {
+            let pad = padding_needed(8192);
+            assert!((16..64).contains(&pad), "pad={pad}");
+        }
+    }
+
+    #[test]
+    fn random_padding_length_matches() {
+        for n in [0usize, 1, 16, 256, 4096] {
+            assert_eq!(random_padding(n).len(), n);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_padding_within_jitter_window(len in 0usize..6000) {
+            const BUCKETS: &[usize] = &[512, 1024, 1280, 1500, 2048, 4096];
+            let pad = padding_needed(len);
+            let total = len + pad;
+            // Either we're in a bucket+jitter window, or we're past the largest bucket and got 16..64 tail.
+            let ok = BUCKETS.iter().any(|&b| len < b && total >= b && total < b + 32)
+                || (len >= 4096 && (16..64).contains(&pad));
+            prop_assert!(ok, "len={len} pad={pad} total={total}");
+        }
+    }
+}

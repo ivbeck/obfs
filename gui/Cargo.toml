@@ -5,6 +5,8 @@ edition = "2021"
 description = "Cross-platform desktop GUI for vpn-obfs client"
 
 [dependencies]
+anyhow = "1"
 eframe = "0.34.2"
 tokio = { version = "1.52.3", features = ["full"] }
 vpn-obfs-client = { path = "../client" }
+vpn-obfs-common = { path = "../common" }

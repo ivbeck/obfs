@@ -134,3 +134,76 @@ pub fn client_config_no_verify() -> ClientConfig {
 pub fn make_connector(config: ClientConfig) -> TlsConnector {
     TlsConnector::from(Arc::new(config))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gen_pem_pair() -> (String, String) {
+        let cert = rcgen::generate_simple_self_signed(vec!["test.local".into()]).unwrap();
+        (
+            cert.serialize_pem().unwrap(),
+            cert.serialize_private_key_pem(),
+        )
+    }
+
+    #[test]
+    fn server_config_self_signed_roundtrip() {
+        let (cfg, der) = server_config_self_signed("test.local").unwrap();
+        // SHA-256 fingerprint should be 32 bytes when DER is non-empty.
+        assert!(!der.is_empty());
+        let _ = make_acceptor(cfg);
+        let _pinned = client_config_pinned(der).unwrap();
+    }
+
+    #[test]
+    fn server_config_from_pem_round_trip_with_generated_pair() {
+        let (cert_pem, key_pem) = gen_pem_pair();
+        let cfg = server_config_from_pem(&cert_pem, &key_pem).unwrap();
+        let _ = make_acceptor(cfg);
+    }
+
+    #[test]
+    fn server_config_from_pem_garbage_input_errs() {
+        let res = server_config_from_pem("not a cert", "not a key");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn server_config_from_pem_missing_key_errs() {
+        let (cert_pem, _) = gen_pem_pair();
+        let res = server_config_from_pem(&cert_pem, "");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn server_config_from_pem_with_only_cert_errs() {
+        // Empty key PEM — should fail before rustls even gets a look.
+        let (cert_pem, _) = gen_pem_pair();
+        let res = server_config_from_pem(
+            &cert_pem,
+            "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n",
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn client_config_no_verify_instantiates() {
+        let cfg = client_config_no_verify();
+        // Smoke test: build a connector with it.
+        let _ = make_connector(cfg);
+    }
+
+    #[test]
+    fn client_config_standard_instantiates() {
+        let cfg = client_config_standard().unwrap();
+        let _ = make_connector(cfg);
+    }
+
+    #[test]
+    fn client_config_pinned_with_invalid_der_errs() {
+        // 4-byte slop is not a cert.
+        let res = client_config_pinned(vec![0u8, 1, 2, 3]);
+        assert!(res.is_err());
+    }
+}

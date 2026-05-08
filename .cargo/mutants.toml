@@ -1,0 +1,17 @@
+examine_globs = [
+    "common/src/crypto.rs",
+    "common/src/frame.rs",
+    "common/src/obfs.rs",
+]
+exclude_globs = [
+    "**/tests/**",
+    "**/fuzz/**",
+    "**/gui/**",
+]
+exclude_re = [
+    "vpn-obfs/auth-token",
+    "vpn-obfs/stream-a/v1",
+    "vpn-obfs/stream-b/v1",
+    "vpn-obfs/psk",
+]
+timeout_multiplier = 3.0

@@ -1,6 +1,7 @@
 use std::sync::mpsc::{channel, Receiver};
 
 use eframe::egui;
+use vpn_obfs_common::privilege::{ensure_elevated, ElevationOutcome};
 
 struct App {
     server: String,
@@ -129,11 +130,31 @@ impl eframe::App for App {
     }
 }
 
-fn main() -> eframe::Result<()> {
+fn main() -> anyhow::Result<()> {
+    match ensure_elevated("vpn-obfs-gui")? {
+        ElevationOutcome::Continue => {}
+        ElevationOutcome::Relaunched => return Ok(()),
+    }
+
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "vpn-obfs GUI",
         options,
         Box::new(|_cc| Ok(Box::<App>::default())),
     )
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("WAYLAND_DISPLAY")
+            || msg.contains("DISPLAY")
+            || msg.contains("XOpenDisplayFailed")
+        {
+            anyhow::anyhow!(
+                "start GUI app: no desktop display session detected.\n\
+                 If elevation was requested, your display environment may have been stripped.\n\
+                 Re-run from a desktop terminal or launch manually as root with preserved display env."
+            )
+        } else {
+            anyhow::Error::new(e).context("start GUI app")
+        }
+    })
 }
