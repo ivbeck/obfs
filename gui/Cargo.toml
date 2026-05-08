@@ -1,0 +1,10 @@
+[package]
+name = "vpn-obfs-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform desktop GUI for vpn-obfs client"
+
+[dependencies]
+eframe = "0.34.2"
+tokio = { version = "1.52.3", features = ["full"] }
+vpn-obfs-client = { path = "../client" }

@@ -1,0 +1,20 @@
+[package]
+name = "vpn-obfs-client"
+version = "0.1.0"
+edition = "2021"
+description = "Client binary for vpn-obfs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+hkdf = "0.12"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tun2 = { version = "2", features = ["async"] }
+vpn-obfs-common = { path = "../common" }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
